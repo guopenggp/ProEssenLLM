@@ -1,0 +1,11 @@
+mode: within_species
+data_path: ./data/metadata.pkl
+feature_dir: ./data/features.lmdb
+save_path: ./results/within_species
+sampling_strategy: species_balanced
+species_per_batch: 8
+samples_per_species: 16
+positive_fraction: 0.4
+checkpoint_metric: composite
+random_seed: 42
+deterministic: true
