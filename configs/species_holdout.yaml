@@ -2,6 +2,7 @@ mode: species_holdout
 data_path: ./data/metadata.pkl
 feature_dir: ./data/features.lmdb
 save_path: ./results/species_holdout
+max_length: 1000
 # Replace with the species reserved exclusively for final zero-shot evaluation.
 target_species: [target_species_id]
 validation_species_ratio: 0.2

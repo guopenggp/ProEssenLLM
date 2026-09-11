@@ -39,7 +39,6 @@ from evaluation.metrics import (
 from losses import CombinedSpeciesLoss, compute_species_positive_weights
 from losses.species_losses import positive_weights_for_batch
 from models import (
-    ESMProteinEncoder,
     ProEssenLLM,
     ProEssenLLMClassifier,
     ProEssenLLMFeatureEncoder,
@@ -48,7 +47,7 @@ from models import (
 from samplers import sampler_statistics
 
 
-FRAMEWORK_VERSION = "1.0.0"
+FRAMEWORK_VERSION = "1.1.0"
 CHECKPOINT_NAME = "best_validation_model.pt"
 
 
@@ -103,29 +102,11 @@ def selection_weights(args) -> dict[str, float]:
 
 
 def build_model(args, splits: DataSplits, device: torch.device):
-    esm_encoder = None
-    if args.encoder_mode == "frozen_lmdb":
-        feature_length = resolve_lmdb_feature_length(
-            args.feature_dir,
-            splits.train["_lmdb_key"].tolist(),
-            args.input_size,
-        )
-    else:
-        esm_encoder = ESMProteinEncoder(
-            model_path=args.esm_model_path,
-            lora_rank=args.lora_rank,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            lora_target_modules=args.lora_target_modules,
-            lora_last_n_layers=args.lora_last_n_layers,
-            lora_train_layernorm=args.lora_train_layernorm,
-            gradient_checkpointing=args.gradient_checkpointing,
-        )
-        feature_length = esm_encoder.output_dim
-        if args.input_size is not None and int(args.input_size) != feature_length:
-            raise ValueError(
-                f"ESM output dimension {feature_length} does not match input_size={args.input_size}"
-            )
+    feature_length = resolve_lmdb_feature_length(
+        args.feature_dir,
+        splits.train["_lmdb_key"].tolist(),
+        args.input_size,
+    )
     feature_encoder = ProEssenLLMFeatureEncoder(
         input_size=feature_length,
         hidden_size=args.hidden_size,
@@ -136,9 +117,9 @@ def build_model(args, splits: DataSplits, device: torch.device):
         drop_path_rate=args.drop_path_rate,
     )
     classifier = ProEssenLLMClassifier(args.hidden_size, args.linear_dropout)
-    model = ProEssenLLM(feature_encoder, classifier, esm_encoder).to(device)
+    model = ProEssenLLM(feature_encoder, classifier).to(device)
     architecture = {
-        "encoder_mode": args.encoder_mode,
+        "input_source": "frozen_lmdb",
         "input_size": int(feature_length),
         "hidden_size": int(args.hidden_size),
         "num_heads": int(args.num_heads),
@@ -147,56 +128,14 @@ def build_model(args, splits: DataSplits, device: torch.device):
         "linear_dropout": float(args.linear_dropout),
         "drop_path_rate": float(args.drop_path_rate),
         "max_length": int(args.max_length),
-        "lora_rank": int(args.lora_rank) if args.encoder_mode == "esm_lora" else None,
-        "lora_alpha": float(args.lora_alpha) if args.encoder_mode == "esm_lora" else None,
-        "lora_target_modules": (
-            list(args.lora_target_modules) if args.encoder_mode == "esm_lora" else None
-        ),
-        "lora_last_n_layers": (
-            int(args.lora_last_n_layers) if args.encoder_mode == "esm_lora" else None
-        ),
-        "lora_dropout": float(args.lora_dropout) if args.encoder_mode == "esm_lora" else None,
-        "lora_train_layernorm": (
-            bool(args.lora_train_layernorm) if args.encoder_mode == "esm_lora" else None
-        ),
-        "gradient_checkpointing": (
-            bool(args.gradient_checkpointing) if args.encoder_mode == "esm_lora" else None
-        ),
-        "esm_model_path": str(args.esm_model_path) if args.encoder_mode == "esm_lora" else None,
     }
     return model, feature_length, architecture
 
 
 def build_optimizer(args, model: ProEssenLLM):
-    if args.encoder_mode == "frozen_lmdb":
-        trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
-        return torch.optim.AdamW(
-            trainable, lr=args.learning_rate, weight_decay=args.weight_decay
-        )
-    esm_parameters = []
-    downstream_parameters = []
-    forbidden = []
-    for name, parameter in model.named_parameters():
-        if not parameter.requires_grad:
-            continue
-        if name.startswith("esm_encoder.esm_model."):
-            esm_parameters.append(parameter)
-            is_adapter = ".lora_a." in name or ".lora_b." in name
-            is_layernorm = args.lora_train_layernorm and "norm" in name.lower()
-            if not is_adapter and not is_layernorm:
-                forbidden.append(name)
-        else:
-            downstream_parameters.append(parameter)
-    if forbidden:
-        raise AssertionError(f"Frozen ESM base parameters became trainable: {forbidden[:5]}")
-    if not esm_parameters or not downstream_parameters:
-        raise ValueError("Both ESM adapter and downstream optimizer groups must be non-empty")
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
     return torch.optim.AdamW(
-        [
-            {"params": esm_parameters, "lr": args.esm_learning_rate, "name": "esm_adapter"},
-            {"params": downstream_parameters, "lr": args.head_learning_rate, "name": "downstream"},
-        ],
-        weight_decay=args.weight_decay,
+        trainable, lr=args.learning_rate, weight_decay=args.weight_decay
     )
 
 
@@ -213,12 +152,7 @@ def build_scheduler(args, optimizer):
 
 
 def model_forward(model: ProEssenLLM, batch: Mapping[str, Any], device: torch.device):
-    """Pass sequence features only; species metadata never enters the model."""
-    if "tokens" in batch:
-        return model(
-            tokens=batch["tokens"].to(device, non_blocking=True),
-            attention_mask=batch["attention_mask"].to(device, non_blocking=True),
-        )
+    """Pass residue features only; species metadata never enters the model."""
     return model(
         residue_features=batch["residue_features"].to(device, non_blocking=True),
         valid_mask=batch["valid_mask"].to(device, non_blocking=True),
@@ -366,12 +300,10 @@ class BaseTrainer:
         output_directory = Path(args.save_path).resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
 
-        table, selected_sequence_column = prepare_metadata(
+        table = prepare_metadata(
             args.data_path,
             args.label_name,
             args.group_column,
-            args.encoder_mode,
-            args.sequence_column,
         )
         splits = split_metadata(
             table=table,
@@ -401,10 +333,8 @@ class BaseTrainer:
         model, feature_length, architecture = build_model(args, splits, device)
         model_statistics = parameter_statistics(model)
         save_json(model_statistics, output_directory / "model_statistics.json")
-        alphabet = model.esm_encoder.alphabet if model.esm_encoder is not None else None
         loaders, batch_sampler = create_dataloaders(
             splits=splits,
-            encoder_mode=args.encoder_mode,
             batch_size=args.batch_size,
             max_length=args.max_length,
             random_seed=args.random_seed,
@@ -416,7 +346,6 @@ class BaseTrainer:
             feature_dir=args.feature_dir,
             feature_length=feature_length,
             truncate_strategy=args.truncate_strategy,
-            alphabet=alphabet,
         )
 
         config = vars(args).copy()
@@ -424,9 +353,9 @@ class BaseTrainer:
             {
                 "framework": "ProEssenLLM",
                 "framework_version": FRAMEWORK_VERSION,
+                "input_source": "frozen_lmdb",
                 "resolved_device": str(device),
                 "resolved_input_size": int(feature_length),
-                "resolved_sequence_column": selected_sequence_column,
                 "resolved_validation_species": sorted(
                     splits.validation["_species_id"].unique().tolist()
                 ),

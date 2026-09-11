@@ -1,28 +1,45 @@
-# 修改日志
+# 修改记录
 
-原始文件夹 `1` 和 `722` 均未修改。所有新增与重构均位于本工程。
+## 版本 1.1.0（2026-09-11）
 
-| 文件 | 修改原因 | 融合来源 |
-|---|---|---|
-| `train.py` | 新增统一 `--mode` 入口 | 722 主训练流程，文件夹 1 参数思想 |
-| `__init__.py` | 声明工程包和版本 | 新增 |
-| `models/proessenllm_model.py` | 统一 frozen/ESM-LoRA 模型，移除旧命名，增加安全 checkpoint 状态接口 | 722 模型主体，文件夹 1 的 padding 防御 |
-| `datasets/proessenllm_dataset.py` | 分离两种拆分协议，统一 Dataset/DataLoader，增加旧 LMDB 兼容与 head-tail 截断 | 722 数据主体，文件夹 1 截断与 within-species 逻辑 |
-| `samplers/species_label_balanced.py` | 保证每批多个 distinct species，并控制每 species 正负比例 | 文件夹 1 的 species-label-balanced 思想 |
-| `losses/species_losses.py` | 训练集限定的 species 正类权重与 global/within-species ranking loss | 722 loss 主体，文件夹 1 数值稳定处理 |
-| `evaluation/metrics.py` | 增加 AUPR、逐物种 CSV、q25 与真正 worst-species AUC | 722 分布指标，文件夹 1 的 F1/BA 报告 |
-| `evaluation/checkpoint.py` | 单/复合指标选择、early stopping、格式版本和架构指纹 | 722 validation candidate 逻辑 |
-| `evaluation/leakage.py` | 样本、物种、target、模型输入和选择来源审计 | 722 断言扩展 |
-| `evaluation/compare_runs.py` | 自动输出原 722 与新框架六项性能比较 | 新增 |
-| `trainers/base_trainer.py` | 统一训练引擎；test 延迟到 checkpoint 锁定后；逐物种 epoch 监控 | 722 主体，文件夹 1 训练诊断 |
-| `trainers/within_species_trainer.py` | 明确已知物种协议入口 | 新增 |
-| `trainers/species_holdout_trainer.py` | 明确未知物种 zero-shot 协议入口 | 722 holdout 逻辑重构 |
-| `configs/proessenllm_config.py` | 参数验证、模式互斥、可复现默认值 | 两工程配置整合 |
-| `configs/*.yaml` | 提供两种模式示例 | 新增 |
-| `tests/test_framework.py` | 验证拆分、target 隔离、batch 结构与尾部指标 | 新增 |
-| `tests/smoke_training.py` | 用合成 LMDB 对两种模式执行一轮端到端训练 | 新增 |
-| `README.md` | 工程结构、安装、运行与输出说明 | 新增 |
-| `requirements*.txt`、`.gitignore` | 区分基础/ESM 依赖并排除生成文件 | 新增 |
-| `docs/code_architecture_analysis.md` | 保存修改前架构分析与迁移决策 | 两工程只读审计 |
-| `docs/safety_review.md` | 保存论文实验安全检查 | 新增 |
-| `docs/performance_comparison.md` | 定义无数据时不造数及公平比较协议 | 新增 |
+本次修改将项目收敛为单一的 frozen-feature LMDB 输入流程，便于维护和公开发布。
+
+### 代码
+
+- 新增 `build_esm_lmdb.py`，用于从 FASTA/表格蛋白质序列离线生成训练兼容的 ESM residue-feature LMDB 与 companion metadata。
+- 特征构建器自动记录实际 feature dimension、显式 `lmdb_key`、序列清洗统计和重复序列审计，并将默认生成长度设为 1000。
+- 删除在线 ESM 编码、微调、低秩适配器注入和相应 gradient-checkpointing 实现。
+- 删除 raw-sequence Dataset、序列 collator 和双输入 DataLoader 分支。
+- 删除编码模式、ESM 路径、适配器超参数和双学习率 optimizer 参数。
+- 将 `--max_length` 默认值从 768 调整为 1000，并增加正数校验。
+- 简化模型 forward 为 `residue_features + valid_mask`，checkpoint 始终保存完整模型 state。
+- 将框架版本升级为 1.1.0，将 checkpoint 格式升级为 2。
+- 删除不再需要的可选 ESM 依赖文件。
+- 新增 `requirements-feature-builder.txt`，将离线 ESM 特征生成依赖与核心训练依赖分开。
+
+### 配置与测试
+
+- 两个示例 YAML 都显式记录 `max_length: 1000`。
+- 增加默认长度和已删除参数不再出现在 CLI 中的回归测试。
+- 扩展 `.gitignore`，排除本地数据、LMDB、checkpoint、虚拟环境和编辑器文件。
+
+### 文档
+
+- 重写 README，补充环境、数据格式、运行方式、核心参数、输出文件、测试、复现与 GitHub 发布说明。
+- 重写架构文档，使模块职责、数据流和 checkpoint v2 与当前代码一致。
+- 更新安全审计，说明 pickle 信任边界、ID 泄漏检查范围和输出隐私风险。
+
+## 主要文件职责
+
+| 文件 | 职责 |
+|---|---|
+| `train.py` | 统一训练入口 |
+| `build_esm_lmdb.py` | FASTA/表格序列清洗、ESM embedding 与 LMDB 构建 |
+| `configs/proessenllm_config.py` | 命令行/YAML/JSON 配置与参数验证 |
+| `datasets/proessenllm_dataset.py` | Metadata、拆分、LMDB Dataset 与 DataLoader |
+| `models/proessenllm_model.py` | Residue-feature Transformer 和分类器 |
+| `trainers/base_trainer.py` | 训练、validation-only 选择与最终评价 |
+| `evaluation/checkpoint.py` | 版本化 checkpoint 与架构兼容检查 |
+| `README.md` | 用户安装、数据、运行和输出指南 |
+| `docs/code_architecture_analysis.md` | 当前工程架构说明 |
+| `docs/safety_review.md` | 数据泄漏、复现和输入安全检查 |

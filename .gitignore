@@ -1,5 +1,19 @@
 __pycache__/
 *.py[cod]
+.Python
 .pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local datasets, checkpoints, and generated reports
+data/
+*.lmdb
+*.pt
 results/
 comparison/

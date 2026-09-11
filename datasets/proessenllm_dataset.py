@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pickle
 import random
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -51,23 +50,11 @@ def prepare_metadata(
     data_path: str,
     label_name: str = "essential",
     group_column: str = "group",
-    encoder_mode: str = "frozen_lmdb",
-    sequence_column: str = "normalized_sequence",
-) -> tuple[pd.DataFrame, str]:
+) -> pd.DataFrame:
     table = _read_table(data_path)
     missing = [name for name in (label_name, group_column) if name not in table]
     if missing:
         raise ValueError(f"Metadata table is missing columns: {missing}")
-    selected_sequence_column = sequence_column
-    if encoder_mode == "esm_lora" and selected_sequence_column not in table:
-        if selected_sequence_column == "normalized_sequence" and "sequence" in table:
-            selected_sequence_column = "sequence"
-            warnings.warn(
-                "normalized_sequence is absent; falling back to sequence",
-                RuntimeWarning,
-            )
-        else:
-            raise ValueError(f"Sequence column '{sequence_column}' is required for esm_lora")
     sample_indices = pd.Series(table.index, index=table.index).map(str)
     if sample_indices.duplicated().any():
         raise ValueError("Metadata indices must remain unique after string normalization")
@@ -85,11 +72,7 @@ def prepare_metadata(
     species_ids = sorted(table["_species_id"].unique().tolist(), key=_species_sort_key)
     species_codes = {species_id: code for code, species_id in enumerate(species_ids)}
     table["_species_code"] = table["_species_id"].map(species_codes).astype(int)
-    if encoder_mode == "esm_lora":
-        table["_sequence"] = table[selected_sequence_column].astype(str).str.strip()
-        if table["_sequence"].str.len().eq(0).any():
-            raise ValueError("Empty protein sequences are not supported")
-    return table, selected_sequence_column
+    return table
 
 
 def _split_count(size: int, ratio: float) -> int:
@@ -492,25 +475,6 @@ class FrozenLMDBDataset(Dataset):
         }
 
 
-class RawSequenceDataset(Dataset):
-    def __init__(self, table: pd.DataFrame):
-        columns = ["_sample_index", "_sequence", "_label", "_species_id", "_species_code"]
-        self.records = table[columns].to_dict("records")
-
-    def __len__(self) -> int:
-        return len(self.records)
-
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        record = self.records[index]
-        return {
-            "sequence": record["_sequence"],
-            "label": float(record["_label"]),
-            "species_id": record["_species_id"],
-            "species_code": int(record["_species_code"]),
-            "sample_index": record["_sample_index"],
-        }
-
-
 def collate_frozen(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     max_length = max(item["residue_features"].shape[0] for item in batch)
     feature_length = batch[0]["residue_features"].shape[1]
@@ -530,30 +494,6 @@ def collate_frozen(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-class ESMSequenceCollator:
-    def __init__(self, alphabet, max_length: int):
-        self.alphabet = alphabet
-        self.max_length = int(max_length)
-        try:
-            self.batch_converter = alphabet.get_batch_converter(truncation_seq_length=max_length)
-        except TypeError:
-            self.batch_converter = alphabet.get_batch_converter(max_length)
-
-    def __call__(self, batch: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-        converter_input = [
-            (item["sample_index"], item["sequence"][: self.max_length]) for item in batch
-        ]
-        _, _, tokens = self.batch_converter(converter_input)
-        return {
-            "tokens": tokens,
-            "attention_mask": tokens.ne(int(self.alphabet.padding_idx)),
-            "labels": torch.tensor([item["label"] for item in batch], dtype=torch.float32),
-            "species_codes": torch.tensor([item["species_code"] for item in batch], dtype=torch.long),
-            "species_ids": [item["species_id"] for item in batch],
-            "sample_indices": [item["sample_index"] for item in batch],
-        }
-
-
 def _seed_worker(_worker_id: int) -> None:
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
@@ -562,7 +502,6 @@ def _seed_worker(_worker_id: int) -> None:
 
 def create_dataloaders(
     splits: DataSplits,
-    encoder_mode: str,
     batch_size: int,
     max_length: int,
     random_seed: int,
@@ -574,28 +513,19 @@ def create_dataloaders(
     feature_dir: str | None = None,
     feature_length: int | None = None,
     truncate_strategy: str = "head_tail",
-    alphabet=None,
 ) -> tuple[dict[str, DataLoader], SpeciesLabelBalancedBatchSampler | None]:
     if sampling_strategy not in {"random", "species_balanced"}:
         raise ValueError("sampling_strategy must be random or species_balanced")
     frames = {"train": splits.train, "validation": splits.validation, "test": splits.test}
-    if encoder_mode == "frozen_lmdb":
-        if not feature_dir or feature_length is None:
-            raise ValueError("feature_dir and feature_length are required for frozen_lmdb")
-        datasets = {
-            name: FrozenLMDBDataset(
-                frame, feature_dir, max_length, feature_length, truncate_strategy
-            )
-            for name, frame in frames.items()
-        }
-        collate_function = collate_frozen
-    elif encoder_mode == "esm_lora":
-        if alphabet is None:
-            raise ValueError("An ESM alphabet is required for esm_lora")
-        datasets = {name: RawSequenceDataset(frame) for name, frame in frames.items()}
-        collate_function = ESMSequenceCollator(alphabet, max_length)
-    else:
-        raise ValueError("encoder_mode must be frozen_lmdb or esm_lora")
+    if not feature_dir or feature_length is None:
+        raise ValueError("feature_dir and feature_length are required")
+    datasets = {
+        name: FrozenLMDBDataset(
+            frame, feature_dir, max_length, feature_length, truncate_strategy
+        )
+        for name, frame in frames.items()
+    }
+    collate_function = collate_frozen
 
     batch_sampler = None
     if sampling_strategy == "species_balanced":

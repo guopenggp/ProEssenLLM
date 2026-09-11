@@ -1,22 +1,152 @@
 from __future__ import annotations
 
+import pickle
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
+import lmdb
 import numpy as np
 import pandas as pd
+import torch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from build_esm_lmdb import (
+    build_companion_dataframe,
+    build_records,
+    normalize_sequence,
+    parse_args as parse_feature_builder_args,
+    summarize_duplicates,
+    write_lmdb,
+)
+from configs import parse_configuration
 from datasets.proessenllm_dataset import prepare_metadata, split_metadata
 from evaluation.leakage import audit_splits
 from evaluation.metrics import distribution_metrics
 from models import ProEssenLLM
 from samplers import SpeciesLabelBalancedBatchSampler
+
+
+class ConfigurationTests(unittest.TestCase):
+    def test_frozen_feature_defaults_and_removed_options(self):
+        args = parse_configuration(["--mode", "within_species"])
+        self.assertEqual(args.max_length, 1000)
+        for removed_option in (
+            "encoder_mode",
+            "esm_model_path",
+            "esm_learning_rate",
+            "head_learning_rate",
+            "gradient_checkpointing",
+            "lora_rank",
+        ):
+            self.assertFalse(hasattr(args, removed_option))
+
+
+class FeatureBuilderTests(unittest.TestCase):
+    def test_defaults_match_training_and_companion_keys_match_lmdb(self):
+        args = parse_feature_builder_args(
+            ["--data_path", "proteins.csv", "--output_lmdb", "features.lmdb"]
+        )
+        self.assertEqual(args.truncation_seq_length, 1000)
+        table = pd.DataFrame(
+            {
+                "ID": ["protein_a", "protein_b"],
+                "group": ["species_a", "species_b"],
+                "essential": [1, 0],
+                "sequence": ["ACD*", "***"],
+            },
+            index=[10, 11],
+        )
+        records, statistics, kept_indices = build_records(
+            table, args, set("ACDEFGHIKLMNPQRSTVWYBXZUO")
+        )
+        companion = build_companion_dataframe(table, kept_indices, args)
+        self.assertEqual(statistics["usable_rows"], 1)
+        self.assertEqual(statistics["skipped_rows"], 1)
+        self.assertEqual(companion["lmdb_key"].tolist(), ["10"])
+        self.assertEqual(next(iter(records.values()))[0]["key"], "10")
+
+    def test_writer_produces_training_compatible_metadata(self):
+        class FakeAlphabet:
+            @staticmethod
+            def get_batch_converter(truncation_seq_length):
+                def convert(batch):
+                    labels, sequences = zip(*batch)
+                    retained = [sequence[:truncation_seq_length] for sequence in sequences]
+                    token_count = max(map(len, retained)) + 2
+                    tokens = torch.zeros((len(batch), token_count), dtype=torch.long)
+                    return list(labels), retained, tokens
+
+                return convert
+
+        class FakeModel:
+            @staticmethod
+            def __call__(tokens, repr_layers, return_contacts):
+                del return_contacts
+                shape = (tokens.size(0), tokens.size(1), 4)
+                representation = torch.arange(
+                    int(np.prod(shape)), dtype=torch.float32
+                ).reshape(shape)
+                return {"representations": {repr_layers[0]: representation}}
+
+        args = parse_feature_builder_args(
+            ["--data_path", "unused.csv", "--output_lmdb", "unused.lmdb"]
+        )
+        args.map_size_gb = 0.01
+        args.commit_every = 1
+        table = pd.DataFrame(
+            {
+                "ID": ["protein_a"],
+                "group": ["species_a"],
+                "essential": [1],
+                "sequence": ["ACD"],
+            },
+            index=[10],
+        )
+        records, statistics, _ = build_records(
+            table, args, set("ACDEFGHIKLMNPQRSTVWYBXZUO")
+        )
+        duplicate_summary = summarize_duplicates(records, statistics["usable_rows"])
+        with tempfile.TemporaryDirectory(prefix="proessenllm_builder_") as temporary:
+            output_path = Path(temporary) / "features.lmdb"
+            count = write_lmdb(
+                output_lmdb=output_path,
+                sequence_to_records=records,
+                stats=statistics,
+                duplicate_summary=duplicate_summary,
+                model=FakeModel(),
+                alphabet=FakeAlphabet(),
+                device=torch.device("cpu"),
+                resolved_layer=1,
+                feature_length=4,
+                args=args,
+            )
+            environment = lmdb.open(
+                str(output_path), subdir=False, readonly=True, lock=False
+            )
+            try:
+                with environment.begin(write=False) as transaction:
+                    metadata = pickle.loads(transaction.get(b"__metadata__"))
+                    sample = pickle.loads(transaction.get(b"10"))
+            finally:
+                environment.close()
+            self.assertEqual(count, 1)
+            self.assertEqual(metadata["feature_length"], 4)
+            self.assertEqual(sample["feature"].shape, (3, 4))
+
+    def test_sequence_normalization_reports_changes(self):
+        normalized, changed, invalid, stop_stats = normalize_sequence(
+            " acD?* ", set("ACDX"), invalid_policy="mask", internal_stop_policy="mask"
+        )
+        self.assertEqual(normalized, "ACDX")
+        self.assertTrue(changed)
+        self.assertEqual(dict(invalid), {"?": 1})
+        self.assertEqual(stop_stats["terminal_stop_removed"], 1)
 
 
 def synthetic_table(species_count: int = 6, samples_per_label: int = 6) -> pd.DataFrame:

@@ -2,6 +2,7 @@ mode: within_species
 data_path: ./data/metadata.pkl
 feature_dir: ./data/features.lmdb
 save_path: ./results/within_species
+max_length: 1000
 sampling_strategy: species_balanced
 species_per_batch: 8
 samples_per_species: 16

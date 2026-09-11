@@ -14,7 +14,7 @@ from .metrics import checkpoint_score
 
 
 PROJECT_NAME = "ProEssenLLM"
-CHECKPOINT_FORMAT_VERSION = 1
+CHECKPOINT_FORMAT_VERSION = 2
 
 
 def architecture_fingerprint(architecture: Mapping[str, Any]) -> str:
@@ -121,7 +121,7 @@ def build_checkpoint_payload(
         "project": PROJECT_NAME,
         "format_version": CHECKPOINT_FORMAT_VERSION,
         "mode": config["mode"],
-        "encoder_mode": config["encoder_mode"],
+        "input_source": config["input_source"],
         "architecture": dict(architecture),
         "architecture_fingerprint": architecture_fingerprint(architecture),
         "model_state_kind": state_kind,

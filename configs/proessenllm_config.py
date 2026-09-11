@@ -43,7 +43,6 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--save_path", default=None)
     parser.add_argument("--label_name", default="essential")
     parser.add_argument("--group_column", default="group")
-    parser.add_argument("--sequence_column", default="normalized_sequence")
 
     parser.add_argument("--test_ratio", type=float, default=0.1)
     parser.add_argument("--validation_ratio", type=float, default=0.1)
@@ -60,14 +59,8 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--min_positive_per_species", type=int, default=1)
     parser.add_argument("--min_negative_per_species", type=int, default=1)
 
-    parser.add_argument(
-        "--encoder_mode", choices=["frozen_lmdb", "esm_lora"], default="frozen_lmdb"
-    )
-    parser.add_argument(
-        "--esm_model_path", default="./pretrained_model/esm2_t33_650M_UR50D.pt"
-    )
     parser.add_argument("--input_size", type=int, default=None)
-    parser.add_argument("--max_length", type=int, default=768)
+    parser.add_argument("--max_length", type=int, default=1000)
     parser.add_argument(
         "--truncate_strategy", choices=["head", "tail", "head_tail"], default="head_tail"
     )
@@ -119,21 +112,12 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--early_stopping_min_delta", type=float, default=0.0002)
 
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--esm_learning_rate", type=float, default=5e-5)
-    parser.add_argument("--head_learning_rate", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--num_epochs", type=int, default=150)
     parser.add_argument("--warmup_epochs", type=int, default=1)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--use_amp", action="store_true")
-    parser.add_argument("--gradient_checkpointing", action="store_true")
-    parser.add_argument("--lora_rank", type=int, default=8)
-    parser.add_argument("--lora_alpha", type=float, default=16.0)
-    parser.add_argument("--lora_dropout", type=float, default=0.05)
-    parser.add_argument("--lora_target_modules", nargs="+", default=["q_proj", "v_proj"])
-    parser.add_argument("--lora_last_n_layers", type=int, default=12)
-    parser.add_argument("--lora_train_layernorm", action="store_true")
     parser.add_argument("--random_seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--device", default="cuda:0")
@@ -160,10 +144,10 @@ def validate_configuration(args: argparse.Namespace) -> None:
         raise ValueError("species_holdout requires --target_species")
     if set(map(str, args.target_species)) & set(map(str, args.exclude_species)):
         raise ValueError("target_species and exclude_species must not overlap")
-    if args.encoder_mode == "frozen_lmdb" and not args.feature_dir:
-        raise ValueError("feature_dir is required for frozen_lmdb")
-    if args.encoder_mode == "esm_lora" and not args.esm_model_path:
-        raise ValueError("esm_model_path is required for esm_lora")
+    if not args.feature_dir:
+        raise ValueError("feature_dir is required")
+    if args.max_length <= 0:
+        raise ValueError("max_length must be positive")
     if args.hidden_size <= 0 or args.num_heads <= 0 or args.hidden_size % args.num_heads:
         raise ValueError("hidden_size must be positive and divisible by num_heads")
     if args.num_layers <= 0 or args.batch_size <= 0 or args.num_epochs <= 0:
@@ -195,8 +179,6 @@ def validate_configuration(args: argparse.Namespace) -> None:
         raise ValueError("Checkpoint AUC weights must sum to 1")
     if args.early_stopping_patience <= 0 or args.max_grad_norm <= 0:
         raise ValueError("Patience and max_grad_norm must be positive")
-    if args.lora_rank <= 0 or args.lora_last_n_layers <= 0:
-        raise ValueError("LoRA rank and layer count must be positive")
 
 
 def parse_configuration(argv: Sequence[str] | None = None) -> argparse.Namespace:
