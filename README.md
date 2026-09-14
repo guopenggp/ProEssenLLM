@@ -1,8 +1,8 @@
 # ProEssenLLM
 
-ProEssenLLM 是一个基于预计算蛋白质残基特征的必需性二分类训练框架。项目提供两种严格分离的实验协议、物种均衡采样、面向类别不平衡的损失、逐物种评价，以及带泄漏审计的 validation-only 模型选择流程。
+ProEssenLLM 是一个基于蛋白质大语言模型的原核生物必需性二分类训练框架。项目提供两种严格分离的实验协议、物种均衡采样、面向类别不平衡的损失、逐物种评价，以及带泄漏审计的 validation-only 模型选择流程。
 
-训练阶段只接受 frozen LMDB residue features，不包含在线 ESM 编码或微调模式。仓库提供独立的 `build_esm_lmdb.py`，可在训练前将蛋白质序列转换为兼容的特征 LMDB。默认特征生成和训练截断长度均为 **1000** 个残基。
+训练阶段只接受 frozen LMDB residue features。仓库提供独立的 `build_esm_lmdb.py`，可在训练前将蛋白质序列转换为兼容的特征 LMDB。默认特征生成和训练截断长度均为 **1000** 个残基。
 
 ## 功能概览
 
