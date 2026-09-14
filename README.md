@@ -326,10 +326,6 @@ python evaluation/compare_runs.py \
 
 更多内容见 [架构说明](docs/code_architecture_analysis.md) 和 [实验安全检查](docs/safety_review.md)。
 
-## 从早期版本迁移
-
-版本 1.1.0 删除了训练阶段的在线 ESM 微调路径及其命令行参数，只保留预计算 LMDB 特征输入。离线 ESM 仅由 `build_esm_lmdb.py` 用于训练前的数据准备。旧训练配置中的编码模式、ESM 模型路径、ESM 专用学习率、梯度检查点和低秩适配器参数需要删除。Checkpoint 格式已升级为 v2，旧格式 checkpoint 不会被静默载入。
-
 ## GitHub 发布注意事项
 
 `.gitignore` 默认排除本地数据、LMDB、模型 checkpoint、虚拟环境和生成结果。提交前建议：
